@@ -40,7 +40,7 @@
 	          				</descriptorRefs>
 	          				<archive>
 	           					<manifest>
-	              					<mainClass>HectorTest</mainClass>
+	              					<mainClass>TrafficPredictionClient</mainClass>
 	            				</manifest>
 	          				</archive>
 	        			</configuration>

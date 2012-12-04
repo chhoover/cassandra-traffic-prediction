@@ -1,13 +1,16 @@
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Array;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
+import java.util.Collection;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Scanner;
+import java.util.TreeMap;
 
 import me.prettyprint.cassandra.serializers.DoubleSerializer;
 import me.prettyprint.cassandra.serializers.LongSerializer;
@@ -180,25 +183,35 @@ public class TrafficPredictionClient
 	public double getPredictedSpeed(int stationId, String predictedArrivalTime)
 	{
 		try
-		{			
-			ArrayList<Date> dates = getAllPreviousDates(dateTemplate.parse(predictedArrivalTime));	
-			HashMap<Long, Double> allSamples = new HashMap<Long, Double>();
+		{
+			Date predictedArrivalAsDate = dateTemplate.parse(predictedArrivalTime);
+			ArrayList<Date> dates = getAllPreviousDates(predictedArrivalAsDate);	
+			TreeMap<Long, Double> allSamples = new TreeMap<Long, Double>();
 			for (Date d : dates)
 			{
 				String key = constructKey(stationId, d);
 				Date rangeStart = getRangeStartForDate(d);
 				Date rangeEnd = getRangeEndForDate(d);
 				HashMap<Long, Double> queryResults = sliceQuery(rangeStart, rangeEnd, key);
-				System.out.println("===== " + d.toString() + " =====");
 				allSamples.putAll(queryResults);
-				for (Long l : queryResults.keySet())
-				{
-					Date sampleTime = new Date(l);
-					System.out.println(sampleTime.toString() + " --> " + queryResults.get(l));
-				}
 			}
 			
-			return predict(allSamples);
+			for (Long l : allSamples.keySet())
+			{
+				Date sampleTime = new Date(l);
+				System.out.println(sampleTime.toString() + " --> " + allSamples.get(l));
+			}
+			
+			System.out.println("\n----- Simple Average -----");
+			System.out.println("Predicted speed: " + simpleAverage(allSamples.values()) + " mph");
+			
+			System.out.println("\n----- Weighted Average -----");
+			System.out.println("Predicted speed: " + weightedAverage(allSamples, predictedArrivalAsDate) + " mph");
+			
+			System.out.println("\n----- Exponential Smoothing (Alpha = 0.5) -----");
+			System.out.println("Predicted speed: " + exponentialSmoothing(allSamples, 0.5) + " mph");
+			
+			return 0.0;
 		}
 		catch (ParseException e)
 		{
@@ -207,10 +220,87 @@ public class TrafficPredictionClient
 		}
 	}
 	
-	public double predict(HashMap<Long, Double> samples)
+	/**
+	 * Generates a predicted speed value by averaging all values retrieved
+	 * from the database.
+	 * @param speeds A set of speeds from the database
+	 * @return The average of the provided speed set (in mph)
+	 */
+	public double simpleAverage(Collection<Double> speeds)
 	{
-		// TODO
-		return 0.0;
+		double sum = 0.0;
+		
+		for (Double d : speeds)
+			sum += d;
+		
+		return sum / (double) speeds.size();
+	}
+	
+	/**
+	 * Generates a predicted speed value using a weighted average. Weights are
+	 * calculated dynamically using the difference between the requested date
+	 * and a sample's timestamp, such that older samples are weighted lower.
+	 * @param speeds A mapping of [column name (timestamp)]->[speed]
+	 * fetched from the database
+	 * @param predictedArrivalAsDate
+	 * @return The predicted speed in mph
+	 */
+	public double weightedAverage(TreeMap<Long, Double> speeds, Date predictedArrivalAsDate)
+	{
+		double[] weights = new double[speeds.size()];
+		double predictedDate = predictedArrivalAsDate.getTime();
+		int i = 0;
+		double sum = 0;
+		for (Long l : speeds.descendingKeySet())
+		{			
+			weights[i] = 1.0 / (double)(predictedDate - l);
+			sum += weights[i];
+			++i;
+		}
+		
+		double differenceFromOne = 1 - sum;
+		double normalizeFactor = differenceFromOne / speeds.size();
+		
+		for (int j = 0; j < weights.length; ++j)
+		{
+			weights[j] += normalizeFactor;
+		}
+		
+		double weightedAvg = 0;
+		i = 0;
+		for (Long l : speeds.descendingKeySet())
+		{
+			weightedAvg += speeds.get(l) * weights[i];
+			++i;
+		}
+		
+		return weightedAvg;
+	}
+	
+	/**
+	 * Generates a predicted speed value using exponential smoothing.
+	 * @param speeds A mapping of [column name (timestamp)]->[speed]
+	 * fetched from the database
+	 * @param alpha The weighting factor
+	 * @return The predicted speed in mph
+	 */
+	public double exponentialSmoothing(TreeMap<Long, Double> speeds, double alpha)
+	{		
+		int i = 0;
+		double prevActualVal = -1;
+		double prevSmoothVal = -1;
+		for (Long l : speeds.keySet())
+		{
+			double actualVal = speeds.get(l);
+			double smoothVal = (i == 0) ? actualVal : alpha * prevActualVal + (1 - alpha) * prevSmoothVal;
+			prevActualVal = actualVal;
+			prevSmoothVal = smoothVal;
+			++i;
+		}
+		
+		double finalSmoothVal = alpha * prevActualVal + (1 - alpha) * prevSmoothVal;
+		
+		return finalSmoothVal;
 	}
 	
 	/**
